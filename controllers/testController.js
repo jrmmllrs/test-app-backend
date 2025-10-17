@@ -3,7 +3,16 @@ const database = require("../config/database");
 
 class TestController {
   async create(req, res) {
-    const { title, description, time_limit, questions } = req.body;
+    const { 
+      title, 
+      description, 
+      time_limit, 
+      questions,
+      enable_proctoring = true,
+      max_tab_switches = 3,
+      allow_copy_paste = false,
+      require_fullscreen = true
+    } = req.body;
     const created_by = req.user.id;
 
     if (!title || !questions || questions.length === 0) {
@@ -20,8 +29,19 @@ class TestController {
       await connection.beginTransaction();
 
       const [testResult] = await connection.execute(
-        "INSERT INTO tests (title, description, time_limit, created_by) VALUES (?, ?, ?, ?)",
-        [title, description || null, time_limit || 30, created_by]
+        `INSERT INTO tests (title, description, time_limit, created_by, 
+         enable_proctoring, max_tab_switches, allow_copy_paste, require_fullscreen) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          title, 
+          description || null, 
+          time_limit || 30, 
+          created_by,
+          enable_proctoring ? 1 : 0,
+          max_tab_switches,
+          allow_copy_paste ? 1 : 0,
+          require_fullscreen ? 1 : 0
+        ]
       );
 
       const testId = testResult.insertId;
@@ -63,6 +83,7 @@ class TestController {
       const db = database.getPool();
       const [tests] = await db.execute(
         `SELECT t.id, t.title, t.description, t.time_limit, t.created_at,
+                t.enable_proctoring, t.max_tab_switches,
                 COUNT(q.id) as question_count 
          FROM tests t 
          LEFT JOIN questions q ON t.id = q.test_id 
@@ -90,6 +111,7 @@ class TestController {
       const db = database.getPool();
       const [tests] = await db.execute(
         `SELECT t.id, t.title, t.description, t.time_limit, t.created_at,
+                t.enable_proctoring,
                 COUNT(q.id) as question_count,
                 u.name as created_by_name
          FROM tests t 
@@ -314,7 +336,16 @@ class TestController {
   }
 
   async update(req, res) {
-    const { title, description, time_limit, questions } = req.body;
+    const { 
+      title, 
+      description, 
+      time_limit, 
+      questions,
+      enable_proctoring,
+      max_tab_switches,
+      allow_copy_paste,
+      require_fullscreen
+    } = req.body;
     const testId = req.params.id;
 
     const db = database.getPool();
@@ -345,8 +376,19 @@ class TestController {
         await connection.beginTransaction();
 
         await connection.execute(
-          "UPDATE tests SET title = ?, description = ?, time_limit = ? WHERE id = ?",
-          [title, description || null, time_limit || 30, testId]
+          `UPDATE tests SET title = ?, description = ?, time_limit = ?,
+           enable_proctoring = ?, max_tab_switches = ?, allow_copy_paste = ?, require_fullscreen = ?
+           WHERE id = ?`,
+          [
+            title, 
+            description || null, 
+            time_limit || 30,
+            enable_proctoring !== undefined ? (enable_proctoring ? 1 : 0) : 1,
+            max_tab_switches !== undefined ? max_tab_switches : 3,
+            allow_copy_paste !== undefined ? (allow_copy_paste ? 1 : 0) : 0,
+            require_fullscreen !== undefined ? (require_fullscreen ? 1 : 0) : 1,
+            testId
+          ]
         );
 
         if (questions && questions.length > 0) {
@@ -449,9 +491,11 @@ class TestController {
       }
 
       const [results] = await db.execute(
-        `SELECT r.*, u.name as candidate_name, u.email as candidate_email
+        `SELECT r.*, u.name as candidate_name, u.email as candidate_email,
+                ct.tab_switch_count, ct.violation_count, ct.flagged
          FROM results r
          JOIN users u ON r.candidate_id = u.id
+         LEFT JOIN candidates_tests ct ON r.candidate_id = ct.candidate_id AND r.test_id = ct.test_id
          WHERE r.test_id = ?
          ORDER BY r.taken_at DESC`,
         [req.params.id]

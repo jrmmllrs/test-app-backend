@@ -8,6 +8,7 @@ const authRoutes = require("./routes/authRoutes");
 const testRoutes = require("./routes/testRoutes");
 const resultRoutes = require("./routes/resultRoutes");
 const resultController = require("./controllers/resultController");
+const proctoringRoutes = require("./routes/proctoringRoutes");
 
 dotenv.config();
 
@@ -26,6 +27,7 @@ app.get("/api/admin/results", authMiddleware, requireRole("admin"), (req, res) =
 app.use("/api/auth", authRoutes);
 app.use("/api/tests", testRoutes);
 app.use("/api/results", resultRoutes);
+app.use("/api/proctoring", proctoringRoutes);
 
 // Health check
 app.get("/api/health", (req, res) => {
