@@ -58,89 +58,86 @@ class TestController {
     }
   }
 
-  // New endpoint: Save progress
-// Add this to your testController.js - Fixed saveProgress method
+  async saveProgress(req, res) {
+    try {
+      const db = database.getPool();
+      const testId = req.params.id;
+      const userId = req.user.id;
+      const { answers, time_remaining } = req.body;
 
-async saveProgress(req, res) {
-  try {
-    const db = database.getPool();
-    const testId = req.params.id;
-    const userId = req.user.id;
-    const { answers, time_remaining } = req.body;
+      console.log("Saving progress with time_remaining:", time_remaining);
 
-    console.log("Saving progress with time_remaining:", time_remaining);
+      // Validate time_remaining
+      if (time_remaining === undefined || time_remaining === null || time_remaining < 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid time_remaining value",
+        });
+      }
 
-    // Validate time_remaining
-    if (time_remaining === undefined || time_remaining === null || time_remaining < 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid time_remaining value",
-      });
-    }
+      // Get test details
+      const [tests] = await db.execute(
+        "SELECT time_limit FROM tests WHERE id = ?",
+        [testId]
+      );
 
-    // Get test details
-    const [tests] = await db.execute(
-      "SELECT time_limit FROM tests WHERE id = ?",
-      [testId]
-    );
+      if (tests.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Test not found",
+        });
+      }
 
-    if (tests.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Test not found",
-      });
-    }
-
-    // Check if record exists
-    const [existingRecord] = await db.execute(
-      `SELECT id, start_time FROM candidates_tests 
-       WHERE candidate_id = ? AND test_id = ?`,
-      [userId, testId]
-    );
-
-    if (existingRecord.length > 0) {
-      // Update existing record
-      await db.execute(
-        `UPDATE candidates_tests 
-         SET saved_answers = ?, time_remaining = ?, status = 'in_progress'
+      // Check if record exists
+      const [existingRecord] = await db.execute(
+        `SELECT id, start_time FROM candidates_tests 
          WHERE candidate_id = ? AND test_id = ?`,
-        [
-          JSON.stringify(answers),
-          time_remaining,
-          userId,
-          testId
-        ]
+        [userId, testId]
       );
-    } else {
-      // Insert new record
-      await db.execute(
-        `INSERT INTO candidates_tests 
-         (candidate_id, test_id, start_time, saved_answers, time_remaining, status) 
-         VALUES (?, ?, NOW(), ?, ?, 'in_progress')`,
-        [
-          userId,
-          testId,
-          JSON.stringify(answers),
-          time_remaining
-        ]
-      );
+
+      if (existingRecord.length > 0) {
+        // Update existing record
+        await db.execute(
+          `UPDATE candidates_tests 
+           SET saved_answers = ?, time_remaining = ?, status = 'in_progress'
+           WHERE candidate_id = ? AND test_id = ?`,
+          [
+            JSON.stringify(answers),
+            time_remaining,
+            userId,
+            testId
+          ]
+        );
+      } else {
+        // Insert new record
+        await db.execute(
+          `INSERT INTO candidates_tests 
+           (candidate_id, test_id, start_time, saved_answers, time_remaining, status) 
+           VALUES (?, ?, NOW(), ?, ?, 'in_progress')`,
+          [
+            userId,
+            testId,
+            JSON.stringify(answers),
+            time_remaining
+          ]
+        );
+      }
+
+      console.log("Progress saved successfully with time:", time_remaining);
+
+      res.json({
+        success: true,
+        message: "Progress saved",
+        time_remaining: time_remaining,
+      });
+    } catch (error) {
+      console.error("Error saving progress:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to save progress",
+      });
     }
-
-    console.log("Progress saved successfully with time:", time_remaining);
-
-    res.json({
-      success: true,
-      message: "Progress saved",
-      time_remaining: time_remaining,
-    });
-  } catch (error) {
-    console.error("Error saving progress:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to save progress",
-    });
   }
-}
 
   async create(req, res) {
     const { 
@@ -305,6 +302,31 @@ async saveProgress(req, res) {
     }
   }
 
+  // FIXED: Parse options correctly whether they're JSON or comma-separated strings
+  parseOptions(options) {
+    if (!options) return [];
+    
+    // If it's already an array, return it
+    if (Array.isArray(options)) return options;
+    
+    // If it's a string
+    if (typeof options === 'string') {
+      // Try to parse as JSON first
+      if (options.startsWith('[') || options.startsWith('{')) {
+        try {
+          return JSON.parse(options);
+        } catch (e) {
+          // If JSON parse fails, fall through to comma-separated
+        }
+      }
+      
+      // Parse as comma-separated string
+      return options.split(',').map(opt => opt.trim()).filter(opt => opt.length > 0);
+    }
+    
+    return [];
+  }
+
   async getTestById(req, res) {
     try {
       const db = database.getPool();
@@ -333,9 +355,10 @@ async saveProgress(req, res) {
         [req.params.id]
       );
 
+      // FIXED: Use parseOptions helper to handle both formats
       const parsedQuestions = questions.map((q) => ({
         ...q,
-        options: q.options ? JSON.parse(q.options) : [],
+        options: this.parseOptions(q.options),
       }));
 
       res.json({
@@ -390,13 +413,10 @@ async saveProgress(req, res) {
         [testId]
       );
 
+      // FIXED: Use parseOptions helper
       const parsedQuestions = questions.map((q) => ({
         ...q,
-        options: Array.isArray(q.options)
-          ? q.options
-          : typeof q.options === "string" && q.options.length > 0
-          ? q.options.split(",")
-          : [],
+        options: this.parseOptions(q.options),
       }));
 
       res.json({
@@ -761,4 +781,4 @@ async saveProgress(req, res) {
   }
 }
 
-module.exports = new TestController();
+module.exports = new TestController();  
