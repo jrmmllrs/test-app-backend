@@ -14,6 +14,17 @@ router.get("/my-tests", authMiddleware, (req, res) =>
 router.get("/available", authMiddleware, (req, res) =>
   testController.getAvailableTests(req, res)
 );
+
+// NEW: Get test status (check if completed or in progress)
+router.get("/:id/status", authMiddleware, (req, res) =>
+  testController.getTestStatus(req, res)
+);
+
+// NEW: Save test progress
+router.post("/:id/save-progress", authMiddleware, (req, res) =>
+  testController.saveProgress(req, res)
+);
+
 router.get("/:id", authMiddleware, (req, res) =>
   testController.getTestById(req, res)
 );

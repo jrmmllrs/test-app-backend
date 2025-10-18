@@ -1,7 +1,147 @@
 // controllers/testController.js
 const database = require("../config/database");
+const EmailService = require("../services/emailService");
 
 class TestController {
+  // New endpoint: Check test status for candidate
+  async getTestStatus(req, res) {
+    try {
+      const db = database.getPool();
+      const testId = req.params.id;
+      const userId = req.user.id;
+
+      // Check if test has been completed
+      const [results] = await db.execute(
+        `SELECT id, score, taken_at FROM results 
+         WHERE candidate_id = ? AND test_id = ?`,
+        [userId, testId]
+      );
+
+      if (results.length > 0) {
+        return res.json({
+          success: true,
+          status: "completed",
+          result: results[0],
+        });
+      }
+
+      // Check if test is in progress
+      const [candidateTests] = await db.execute(
+        `SELECT start_time, saved_answers, time_remaining 
+         FROM candidates_tests 
+         WHERE candidate_id = ? AND test_id = ? AND status = 'in_progress'`,
+        [userId, testId]
+      );
+
+      if (candidateTests.length > 0) {
+        const ct = candidateTests[0];
+        return res.json({
+          success: true,
+          status: "in_progress",
+          start_time: ct.start_time,
+          time_remaining: ct.time_remaining,
+          saved_answers: ct.saved_answers ? JSON.parse(ct.saved_answers) : {},
+        });
+      }
+
+      // Test not started yet
+      res.json({
+        success: true,
+        status: "not_started",
+      });
+    } catch (error) {
+      console.error("Error checking test status:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to check test status",
+      });
+    }
+  }
+
+  // New endpoint: Save progress
+// Add this to your testController.js - Fixed saveProgress method
+
+async saveProgress(req, res) {
+  try {
+    const db = database.getPool();
+    const testId = req.params.id;
+    const userId = req.user.id;
+    const { answers, time_remaining } = req.body;
+
+    console.log("Saving progress with time_remaining:", time_remaining);
+
+    // Validate time_remaining
+    if (time_remaining === undefined || time_remaining === null || time_remaining < 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid time_remaining value",
+      });
+    }
+
+    // Get test details
+    const [tests] = await db.execute(
+      "SELECT time_limit FROM tests WHERE id = ?",
+      [testId]
+    );
+
+    if (tests.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Test not found",
+      });
+    }
+
+    // Check if record exists
+    const [existingRecord] = await db.execute(
+      `SELECT id, start_time FROM candidates_tests 
+       WHERE candidate_id = ? AND test_id = ?`,
+      [userId, testId]
+    );
+
+    if (existingRecord.length > 0) {
+      // Update existing record
+      await db.execute(
+        `UPDATE candidates_tests 
+         SET saved_answers = ?, time_remaining = ?, status = 'in_progress'
+         WHERE candidate_id = ? AND test_id = ?`,
+        [
+          JSON.stringify(answers),
+          time_remaining,
+          userId,
+          testId
+        ]
+      );
+    } else {
+      // Insert new record
+      await db.execute(
+        `INSERT INTO candidates_tests 
+         (candidate_id, test_id, start_time, saved_answers, time_remaining, status) 
+         VALUES (?, ?, NOW(), ?, ?, 'in_progress')`,
+        [
+          userId,
+          testId,
+          JSON.stringify(answers),
+          time_remaining
+        ]
+      );
+    }
+
+    console.log("Progress saved successfully with time:", time_remaining);
+
+    res.json({
+      success: true,
+      message: "Progress saved",
+      time_remaining: time_remaining,
+    });
+  } catch (error) {
+    console.error("Error saving progress:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to save progress",
+    });
+  }
+}
+
   async create(req, res) {
     const { 
       title, 
@@ -109,27 +249,58 @@ class TestController {
   async getAvailableTests(req, res) {
     try {
       const db = database.getPool();
+      const userId = req.user.id;
+      
+      // First get all tests
       const [tests] = await db.execute(
         `SELECT t.id, t.title, t.description, t.time_limit, t.created_at,
-                t.enable_proctoring,
-                COUNT(q.id) as question_count,
-                u.name as created_by_name
+                t.enable_proctoring, u.name as created_by_name
          FROM tests t 
-         LEFT JOIN questions q ON t.id = q.test_id 
          LEFT JOIN users u ON t.created_by = u.id
-         GROUP BY t.id 
          ORDER BY t.created_at DESC`
+      );
+
+      // Then enrich with question count and status for each test
+      const enrichedTests = await Promise.all(
+        tests.map(async (test) => {
+          // Get question count
+          const [questions] = await db.execute(
+            'SELECT COUNT(*) as count FROM questions WHERE test_id = ?',
+            [test.id]
+          );
+
+          // Check if completed
+          const [results] = await db.execute(
+            'SELECT id FROM results WHERE test_id = ? AND candidate_id = ?',
+            [test.id, userId]
+          );
+
+          // Check if in progress
+          const [candidateTests] = await db.execute(
+            'SELECT status FROM candidates_tests WHERE test_id = ? AND candidate_id = ?',
+            [test.id, userId]
+          );
+
+          return {
+            ...test,
+            question_count: questions[0].count,
+            is_completed: results.length > 0,
+            is_in_progress: candidateTests.length > 0 && candidateTests[0].status === 'in_progress'
+          };
+        })
       );
 
       res.json({
         success: true,
-        tests,
+        tests: enrichedTests,
       });
     } catch (error) {
       console.error("Error fetching tests:", error);
+      console.error("Error details:", error.stack);
       res.status(500).json({
         success: false,
         message: "Failed to fetch tests",
+        error: error.message
       });
     }
   }
@@ -186,9 +357,25 @@ class TestController {
   async getTestForTaking(req, res) {
     try {
       const db = database.getPool();
+      const userId = req.user.id;
+      const testId = req.params.id;
+
+      // Check if already completed
+      const [results] = await db.execute(
+        "SELECT id FROM results WHERE candidate_id = ? AND test_id = ?",
+        [userId, testId]
+      );
+
+      if (results.length > 0) {
+        return res.status(403).json({
+          success: false,
+          message: "You have already completed this test.",
+        });
+      }
+
       const [tests] = await db.execute(
         "SELECT id, title, description, time_limit FROM tests WHERE id = ?",
-        [req.params.id]
+        [testId]
       );
 
       if (tests.length === 0) {
@@ -200,7 +387,7 @@ class TestController {
 
       const [questions] = await db.execute(
         "SELECT id, question_text, question_type, options FROM questions WHERE test_id = ? ORDER BY id",
-        [req.params.id]
+        [testId]
       );
 
       const parsedQuestions = questions.map((q) => ({
@@ -245,6 +432,20 @@ class TestController {
 
     try {
       await connection.beginTransaction();
+
+      // Check if already completed
+      const [existingResults] = await connection.execute(
+        "SELECT id FROM results WHERE candidate_id = ? AND test_id = ?",
+        [userId, testId]
+      );
+
+      if (existingResults.length > 0) {
+        await connection.rollback();
+        return res.status(403).json({
+          success: false,
+          message: "You have already submitted this test.",
+        });
+      }
 
       const [tests] = await connection.execute(
         "SELECT * FROM tests WHERE id = ?",
@@ -306,12 +507,49 @@ class TestController {
         [userId, testId, totalAutoGraded, correctCount, score, remarks]
       );
 
+      // Update candidates_tests to completed status
       await connection.execute(
-        "INSERT INTO candidates_tests (candidate_id, test_id, start_time, end_time, score, status) VALUES (?, ?, NOW(), NOW(), ?, ?) ON DUPLICATE KEY UPDATE end_time = NOW(), score = ?, status = ?",
-        [userId, testId, score, "completed", score, "completed"]
+        `INSERT INTO candidates_tests (candidate_id, test_id, start_time, end_time, score, status) 
+         VALUES (?, ?, NOW(), NOW(), ?, 'completed') 
+         ON DUPLICATE KEY UPDATE end_time = NOW(), score = ?, status = 'completed', saved_answers = NULL, time_remaining = NULL`,
+        [userId, testId, score, score]
       );
 
       await connection.commit();
+
+      // Send completion email & update invitation
+      try {
+        const [users] = await db.execute(
+          'SELECT name, email FROM users WHERE id = ?', 
+          [userId]
+        );
+        
+        if (users.length > 0) {
+          const user = users[0];
+          const test = tests[0];
+          
+          await EmailService.sendCompletionNotification(
+            user.email,
+            user.name,
+            test.title,
+            {
+              completionTime: new Date().toLocaleString(),
+              totalQuestions: totalAutoGraded,
+              correctAnswers: correctCount,
+              score: score,
+              remarks: remarks
+            },
+            db
+          );
+          
+          await db.execute(
+            'UPDATE test_invitations SET status = ?, completed_at = NOW() WHERE candidate_email = ? AND test_id = ? AND status != ?',
+            ['completed', user.email, testId, 'completed']
+          );
+        }
+      } catch (emailError) {
+        console.error('Error sending completion email:', emailError);
+      }
 
       res.status(201).json({
         success: true,

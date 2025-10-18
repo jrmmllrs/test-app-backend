@@ -2,6 +2,7 @@
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
+const database = require("./config/database"); // Use your existing database
 const { authMiddleware, requireRole } = require("./middleware/auth");
 
 const authRoutes = require("./routes/authRoutes");
@@ -9,6 +10,7 @@ const testRoutes = require("./routes/testRoutes");
 const resultRoutes = require("./routes/resultRoutes");
 const resultController = require("./controllers/resultController");
 const proctoringRoutes = require("./routes/proctoringRoutes");
+const invitationRoutes = require("./routes/InvitationRoutes"); // NEW
 
 dotenv.config();
 
@@ -17,6 +19,12 @@ const app = express();
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// Add database to request object - using your existing database class
+app.use((req, res, next) => {
+  req.db = database.getPool();
+  next();
+});
 
 // Admin route MUST come before other result routes
 app.get("/api/admin/results", authMiddleware, requireRole("admin"), (req, res) => {
@@ -28,6 +36,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/tests", testRoutes);
 app.use("/api/results", resultRoutes);
 app.use("/api/proctoring", proctoringRoutes);
+app.use("/api/invitations", invitationRoutes); // NEW
 
 // Health check
 app.get("/api/health", (req, res) => {
