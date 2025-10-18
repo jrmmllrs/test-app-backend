@@ -15,12 +15,12 @@ router.get("/available", authMiddleware, (req, res) =>
   testController.getAvailableTests(req, res)
 );
 
-// NEW: Get test status (check if completed or in progress)
+// Get test status (check if completed or in progress)
 router.get("/:id/status", authMiddleware, (req, res) =>
   testController.getTestStatus(req, res)
 );
 
-// NEW: Save test progress
+// Save test progress
 router.post("/:id/save-progress", authMiddleware, (req, res) =>
   testController.saveProgress(req, res)
 );
@@ -42,6 +42,17 @@ router.delete("/:id", authMiddleware, (req, res) =>
 );
 router.get("/:id/results", authMiddleware, (req, res) =>
   testController.getTestResults(req, res)
+);
+
+// FIXED: Answer Review Routes - Two separate routes instead of optional parameter
+// Route for viewing own review (no candidateId needed)
+router.get("/:id/review", authMiddleware, (req, res) =>
+  testController.getAnswerReview(req, res)
+);
+
+// Route for viewing specific candidate's review (admin/employer)
+router.get("/:id/review/:candidateId", authMiddleware, (req, res) =>
+  testController.getAnswerReview(req, res)
 );
 
 module.exports = router;

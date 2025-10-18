@@ -58,6 +58,100 @@ class TestController {
     }
   }
 
+  // Add this method to your TestController class in testController.js
+
+async getAnswerReview(req, res) {
+  try {
+    const db = database.getPool();
+    const testId = req.params.id;
+    const candidateId = req.params.candidateId || req.user.id;
+
+    // Check authorization - admin, test creator, or the candidate themselves
+    const [tests] = await db.execute(
+      "SELECT created_by, title, description FROM tests WHERE id = ?",
+      [testId]
+    );
+
+    if (tests.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Test not found",
+      });
+    }
+
+    const test = tests[0];
+    const isAuthorized =
+      req.user.role === "admin" ||
+      test.created_by === req.user.id ||
+      candidateId == req.user.id;
+
+    if (!isAuthorized) {
+      return res.status(403).json({
+        success: false,
+        message: "Unauthorized",
+      });
+    }
+
+    // Get result
+    const [results] = await db.execute(
+      `SELECT id, score, total_questions, correct_answers, remarks, taken_at 
+     FROM results 
+     WHERE candidate_id = ? AND test_id = ?`,
+      [candidateId, testId]
+    );
+
+    if (results.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No results found for this test",
+      });
+    }
+
+    const result = results[0];
+
+    // UPDATED: Include explanation field
+    const [questions] = await db.execute(
+      `SELECT 
+      q.id,
+      q.question_text,
+      q.question_type,
+      q.options,
+      q.correct_answer,
+      q.explanation,
+      a.answer as user_answer,
+      a.is_correct
+     FROM questions q
+     LEFT JOIN answers a ON q.id = a.question_id AND a.candidate_id = ?
+     WHERE q.test_id = ?
+     ORDER BY q.id`,
+      [candidateId, testId]
+    );
+
+    // Parse options for each question
+    const parsedQuestions = questions.map((q) => ({
+      ...q,
+      options: this.parseOptions(q.options),
+    }));
+
+    res.json({
+      success: true,
+      test: {
+        id: testId,
+        title: test.title,
+        description: test.description,
+      },
+      result,
+      questions: parsedQuestions,
+    });
+  } catch (error) {
+    console.error("Error fetching answer review:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch answer review",
+    });
+  }
+}
+
   async saveProgress(req, res) {
     try {
       const db = database.getPool();
@@ -68,7 +162,11 @@ class TestController {
       console.log("Saving progress with time_remaining:", time_remaining);
 
       // Validate time_remaining
-      if (time_remaining === undefined || time_remaining === null || time_remaining < 0) {
+      if (
+        time_remaining === undefined ||
+        time_remaining === null ||
+        time_remaining < 0
+      ) {
         return res.status(400).json({
           success: false,
           message: "Invalid time_remaining value",
@@ -101,12 +199,7 @@ class TestController {
           `UPDATE candidates_tests 
            SET saved_answers = ?, time_remaining = ?, status = 'in_progress'
            WHERE candidate_id = ? AND test_id = ?`,
-          [
-            JSON.stringify(answers),
-            time_remaining,
-            userId,
-            testId
-          ]
+          [JSON.stringify(answers), time_remaining, userId, testId]
         );
       } else {
         // Insert new record
@@ -114,12 +207,7 @@ class TestController {
           `INSERT INTO candidates_tests 
            (candidate_id, test_id, start_time, saved_answers, time_remaining, status) 
            VALUES (?, ?, NOW(), ?, ?, 'in_progress')`,
-          [
-            userId,
-            testId,
-            JSON.stringify(answers),
-            time_remaining
-          ]
+          [userId, testId, JSON.stringify(answers), time_remaining]
         );
       }
 
@@ -139,81 +227,83 @@ class TestController {
     }
   }
 
-  async create(req, res) {
-    const { 
-      title, 
-      description, 
-      time_limit, 
-      questions,
-      enable_proctoring = true,
-      max_tab_switches = 3,
-      allow_copy_paste = false,
-      require_fullscreen = true
-    } = req.body;
-    const created_by = req.user.id;
+async create(req, res) {
+  const {
+    title,
+    description,
+    time_limit,
+    questions,
+    enable_proctoring = true,
+    max_tab_switches = 3,
+    allow_copy_paste = false,
+    require_fullscreen = true,
+  } = req.body;
+  const created_by = req.user.id;
 
-    if (!title || !questions || questions.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Title and at least one question are required",
-      });
-    }
+  if (!title || !questions || questions.length === 0) {
+    return res.status(400).json({
+      success: false,
+      message: "Title and at least one question are required",
+    });
+  }
 
-    const db = database.getPool();
-    const connection = await db.getConnection();
+  const db = database.getPool();
+  const connection = await db.getConnection();
 
-    try {
-      await connection.beginTransaction();
+  try {
+    await connection.beginTransaction();
 
-      const [testResult] = await connection.execute(
-        `INSERT INTO tests (title, description, time_limit, created_by, 
-         enable_proctoring, max_tab_switches, allow_copy_paste, require_fullscreen) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    const [testResult] = await connection.execute(
+      `INSERT INTO tests (title, description, time_limit, created_by, 
+       enable_proctoring, max_tab_switches, allow_copy_paste, require_fullscreen) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        title,
+        description || null,
+        time_limit || 30,
+        created_by,
+        enable_proctoring ? 1 : 0,
+        max_tab_switches,
+        allow_copy_paste ? 1 : 0,
+        require_fullscreen ? 1 : 0,
+      ]
+    );
+
+    const testId = testResult.insertId;
+
+    for (const question of questions) {
+      // UPDATED: Include explanation field
+      await connection.execute(
+        "INSERT INTO questions (test_id, question_text, question_type, options, correct_answer, explanation) VALUES (?, ?, ?, ?, ?, ?)",
         [
-          title, 
-          description || null, 
-          time_limit || 30, 
-          created_by,
-          enable_proctoring ? 1 : 0,
-          max_tab_switches,
-          allow_copy_paste ? 1 : 0,
-          require_fullscreen ? 1 : 0
+          testId,
+          question.question_text,
+          question.question_type,
+          question.options || null,
+          question.correct_answer || null,
+          question.explanation || null, // NEW: explanation field
         ]
       );
-
-      const testId = testResult.insertId;
-
-      for (const question of questions) {
-        await connection.execute(
-          "INSERT INTO questions (test_id, question_text, question_type, options, correct_answer) VALUES (?, ?, ?, ?, ?)",
-          [
-            testId,
-            question.question_text,
-            question.question_type,
-            question.options || null,
-            question.correct_answer || null,
-          ]
-        );
-      }
-
-      await connection.commit();
-
-      res.status(201).json({
-        success: true,
-        message: "Test created successfully",
-        testId,
-      });
-    } catch (error) {
-      await connection.rollback();
-      console.error("Error creating test:", error);
-      res.status(500).json({
-        success: false,
-        message: "Failed to create test",
-      });
-    } finally {
-      connection.release();
     }
+
+    await connection.commit();
+
+    res.status(201).json({
+      success: true,
+      message: "Test created successfully",
+      testId,
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error("Error creating test:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to create test",
+    });
+  } finally {
+    connection.release();
   }
+}
 
   async getMyTests(req, res) {
     try {
@@ -247,7 +337,7 @@ class TestController {
     try {
       const db = database.getPool();
       const userId = req.user.id;
-      
+
       // First get all tests
       const [tests] = await db.execute(
         `SELECT t.id, t.title, t.description, t.time_limit, t.created_at,
@@ -262,19 +352,19 @@ class TestController {
         tests.map(async (test) => {
           // Get question count
           const [questions] = await db.execute(
-            'SELECT COUNT(*) as count FROM questions WHERE test_id = ?',
+            "SELECT COUNT(*) as count FROM questions WHERE test_id = ?",
             [test.id]
           );
 
           // Check if completed
           const [results] = await db.execute(
-            'SELECT id FROM results WHERE test_id = ? AND candidate_id = ?',
+            "SELECT id FROM results WHERE test_id = ? AND candidate_id = ?",
             [test.id, userId]
           );
 
           // Check if in progress
           const [candidateTests] = await db.execute(
-            'SELECT status FROM candidates_tests WHERE test_id = ? AND candidate_id = ?',
+            "SELECT status FROM candidates_tests WHERE test_id = ? AND candidate_id = ?",
             [test.id, userId]
           );
 
@@ -282,7 +372,9 @@ class TestController {
             ...test,
             question_count: questions[0].count,
             is_completed: results.length > 0,
-            is_in_progress: candidateTests.length > 0 && candidateTests[0].status === 'in_progress'
+            is_in_progress:
+              candidateTests.length > 0 &&
+              candidateTests[0].status === "in_progress",
           };
         })
       );
@@ -297,7 +389,7 @@ class TestController {
       res.status(500).json({
         success: false,
         message: "Failed to fetch tests",
-        error: error.message
+        error: error.message,
       });
     }
   }
@@ -305,77 +397,81 @@ class TestController {
   // FIXED: Parse options correctly whether they're JSON or comma-separated strings
   parseOptions(options) {
     if (!options) return [];
-    
+
     // If it's already an array, return it
     if (Array.isArray(options)) return options;
-    
+
     // If it's a string
-    if (typeof options === 'string') {
+    if (typeof options === "string") {
       // Try to parse as JSON first
-      if (options.startsWith('[') || options.startsWith('{')) {
+      if (options.startsWith("[") || options.startsWith("{")) {
         try {
           return JSON.parse(options);
         } catch (e) {
           // If JSON parse fails, fall through to comma-separated
         }
       }
-      
+
       // Parse as comma-separated string
-      return options.split(',').map(opt => opt.trim()).filter(opt => opt.length > 0);
+      return options
+        .split(",")
+        .map((opt) => opt.trim())
+        .filter((opt) => opt.length > 0);
     }
-    
+
     return [];
   }
 
-  async getTestById(req, res) {
-    try {
-      const db = database.getPool();
-      const [tests] = await db.execute("SELECT * FROM tests WHERE id = ?", [
-        req.params.id,
-      ]);
+async getTestById(req, res) {
+  try {
+    const db = database.getPool();
+    const [tests] = await db.execute("SELECT * FROM tests WHERE id = ?", [
+      req.params.id,
+    ]);
 
-      if (tests.length === 0) {
-        return res.status(404).json({
-          success: false,
-          message: "Test not found",
-        });
-      }
-
-      const test = tests[0];
-
-      if (test.created_by !== req.user.id && req.user.role !== "admin") {
-        return res.status(403).json({
-          success: false,
-          message: "Unauthorized",
-        });
-      }
-
-      const [questions] = await db.execute(
-        "SELECT id, question_text, question_type, options, correct_answer FROM questions WHERE test_id = ? ORDER BY id",
-        [req.params.id]
-      );
-
-      // FIXED: Use parseOptions helper to handle both formats
-      const parsedQuestions = questions.map((q) => ({
-        ...q,
-        options: this.parseOptions(q.options),
-      }));
-
-      res.json({
-        success: true,
-        test: {
-          ...test,
-          questions: parsedQuestions,
-        },
-      });
-    } catch (error) {
-      console.error("Error fetching test:", error);
-      res.status(500).json({
+    if (tests.length === 0) {
+      return res.status(404).json({
         success: false,
-        message: "Failed to fetch test",
+        message: "Test not found",
       });
     }
+
+    const test = tests[0];
+
+    if (test.created_by !== req.user.id && req.user.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Unauthorized",
+      });
+    }
+
+    // UPDATED: Select explanation field
+    const [questions] = await db.execute(
+      "SELECT id, question_text, question_type, options, correct_answer, explanation FROM questions WHERE test_id = ? ORDER BY id",
+      [req.params.id]
+    );
+
+    // FIXED: Use parseOptions helper to handle both formats
+    const parsedQuestions = questions.map((q) => ({
+      ...q,
+      options: this.parseOptions(q.options),
+    }));
+
+    res.json({
+      success: true,
+      test: {
+        ...test,
+        questions: parsedQuestions,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching test:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch test",
+    });
   }
+}
 
   async getTestForTaking(req, res) {
     try {
@@ -540,14 +636,14 @@ class TestController {
       // Send completion email & update invitation
       try {
         const [users] = await db.execute(
-          'SELECT name, email FROM users WHERE id = ?', 
+          "SELECT name, email FROM users WHERE id = ?",
           [userId]
         );
-        
+
         if (users.length > 0) {
           const user = users[0];
           const test = tests[0];
-          
+
           await EmailService.sendCompletionNotification(
             user.email,
             user.name,
@@ -557,18 +653,18 @@ class TestController {
               totalQuestions: totalAutoGraded,
               correctAnswers: correctCount,
               score: score,
-              remarks: remarks
+              remarks: remarks,
             },
             db
           );
-          
+
           await db.execute(
-            'UPDATE test_invitations SET status = ?, completed_at = NOW() WHERE candidate_email = ? AND test_id = ? AND status != ?',
-            ['completed', user.email, testId, 'completed']
+            "UPDATE test_invitations SET status = ?, completed_at = NOW() WHERE candidate_email = ? AND test_id = ? AND status != ?",
+            ["completed", user.email, testId, "completed"]
           );
         }
       } catch (emailError) {
-        console.error('Error sending completion email:', emailError);
+        console.error("Error sending completion email:", emailError);
       }
 
       res.status(201).json({
@@ -593,101 +689,103 @@ class TestController {
     }
   }
 
-  async update(req, res) {
-    const { 
-      title, 
-      description, 
-      time_limit, 
-      questions,
-      enable_proctoring,
-      max_tab_switches,
-      allow_copy_paste,
-      require_fullscreen
-    } = req.body;
-    const testId = req.params.id;
+async update(req, res) {
+  const {
+    title,
+    description,
+    time_limit,
+    questions,
+    enable_proctoring,
+    max_tab_switches,
+    allow_copy_paste,
+    require_fullscreen,
+  } = req.body;
+  const testId = req.params.id;
 
-    const db = database.getPool();
+  const db = database.getPool();
 
-    try {
-      const [tests] = await db.execute(
-        "SELECT created_by FROM tests WHERE id = ?",
-        [testId]
-      );
+  try {
+    const [tests] = await db.execute(
+      "SELECT created_by FROM tests WHERE id = ?",
+      [testId]
+    );
 
-      if (tests.length === 0) {
-        return res.status(404).json({
-          success: false,
-          message: "Test not found",
-        });
-      }
-
-      if (tests[0].created_by !== req.user.id && req.user.role !== "admin") {
-        return res.status(403).json({
-          success: false,
-          message: "Unauthorized",
-        });
-      }
-
-      const connection = await db.getConnection();
-
-      try {
-        await connection.beginTransaction();
-
-        await connection.execute(
-          `UPDATE tests SET title = ?, description = ?, time_limit = ?,
-           enable_proctoring = ?, max_tab_switches = ?, allow_copy_paste = ?, require_fullscreen = ?
-           WHERE id = ?`,
-          [
-            title, 
-            description || null, 
-            time_limit || 30,
-            enable_proctoring !== undefined ? (enable_proctoring ? 1 : 0) : 1,
-            max_tab_switches !== undefined ? max_tab_switches : 3,
-            allow_copy_paste !== undefined ? (allow_copy_paste ? 1 : 0) : 0,
-            require_fullscreen !== undefined ? (require_fullscreen ? 1 : 0) : 1,
-            testId
-          ]
-        );
-
-        if (questions && questions.length > 0) {
-          await connection.execute("DELETE FROM questions WHERE test_id = ?", [
-            testId,
-          ]);
-
-          for (const question of questions) {
-            await connection.execute(
-              "INSERT INTO questions (test_id, question_text, question_type, options, correct_answer) VALUES (?, ?, ?, ?, ?)",
-              [
-                testId,
-                question.question_text,
-                question.question_type,
-                question.options || null,
-                question.correct_answer || null,
-              ]
-            );
-          }
-        }
-
-        await connection.commit();
-
-        res.json({
-          success: true,
-          message: "Test updated successfully",
-        });
-      } catch (error) {
-        await connection.rollback();
-        throw error;
-      } finally {
-        connection.release();
-      }
-    } catch (error) {
-      console.error("Error updating test:", error);
-      res.status(500).json({
+    if (tests.length === 0) {
+      return res.status(404).json({
         success: false,
-        message: "Failed to update test",
+        message: "Test not found",
       });
     }
+
+    if (tests[0].created_by !== req.user.id && req.user.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Unauthorized",
+      });
+    }
+
+    const connection = await db.getConnection();
+
+    try {
+      await connection.beginTransaction();
+
+      await connection.execute(
+        `UPDATE tests SET title = ?, description = ?, time_limit = ?,
+         enable_proctoring = ?, max_tab_switches = ?, allow_copy_paste = ?, require_fullscreen = ?
+         WHERE id = ?`,
+        [
+          title,
+          description || null,
+          time_limit || 30,
+          enable_proctoring !== undefined ? (enable_proctoring ? 1 : 0) : 1,
+          max_tab_switches !== undefined ? max_tab_switches : 3,
+          allow_copy_paste !== undefined ? (allow_copy_paste ? 1 : 0) : 0,
+          require_fullscreen !== undefined ? (require_fullscreen ? 1 : 0) : 1,
+          testId,
+        ]
+      );
+
+      if (questions && questions.length > 0) {
+        await connection.execute("DELETE FROM questions WHERE test_id = ?", [
+          testId,
+        ]);
+
+        for (const question of questions) {
+          // UPDATED: Include explanation field
+          await connection.execute(
+            "INSERT INTO questions (test_id, question_text, question_type, options, correct_answer, explanation) VALUES (?, ?, ?, ?, ?, ?)",
+            [
+              testId,
+              question.question_text,
+              question.question_type,
+              question.options || null,
+              question.correct_answer || null,
+              question.explanation || null, // NEW: explanation field
+            ]
+          );
+        }
+      }
+
+      await connection.commit();
+
+      res.json({
+        success: true,
+        message: "Test updated successfully",
+      });
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  } catch (error) {
+    console.error("Error updating test:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to update test",
+    });
   }
+}
 
   async delete(req, res) {
     try {
@@ -726,51 +824,123 @@ class TestController {
     }
   }
 
-  async getTestResults(req, res) {
-    try {
-      const db = database.getPool();
-      const [tests] = await db.execute(
-        "SELECT created_by FROM tests WHERE id = ?",
-        [req.params.id]
-      );
+ // In testController.js - Replace the getTestResults method with this:
 
-      if (tests.length === 0) {
-        return res.status(404).json({
-          success: false,
-          message: "Test not found",
-        });
-      }
+async getTestResults(req, res) {
+  try {
+    const db = database.getPool();
+    const [tests] = await db.execute(
+      "SELECT created_by FROM tests WHERE id = ?",
+      [req.params.id]
+    );
 
-      if (tests[0].created_by !== req.user.id && req.user.role !== "admin") {
-        return res.status(403).json({
-          success: false,
-          message: "Unauthorized",
-        });
-      }
-
-      const [results] = await db.execute(
-        `SELECT r.*, u.name as candidate_name, u.email as candidate_email,
-                ct.tab_switch_count, ct.violation_count, ct.flagged
-         FROM results r
-         JOIN users u ON r.candidate_id = u.id
-         LEFT JOIN candidates_tests ct ON r.candidate_id = ct.candidate_id AND r.test_id = ct.test_id
-         WHERE r.test_id = ?
-         ORDER BY r.taken_at DESC`,
-        [req.params.id]
-      );
-
-      res.json({
-        success: true,
-        results,
-      });
-    } catch (error) {
-      console.error("Error fetching test results:", error);
-      res.status(500).json({
+    if (tests.length === 0) {
+      return res.status(404).json({
         success: false,
-        message: "Failed to fetch test results",
+        message: "Test not found",
       });
     }
+
+    if (tests[0].created_by !== req.user.id && req.user.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Unauthorized",
+      });
+    }
+
+    // FIXED: Use DISTINCT and avoid problematic JOINs
+    // Only select from results table without joining to candidates_tests
+    // since we don't need tab_switch_count, violation_count, or flagged for basic results
+    const [results] = await db.execute(
+      `SELECT DISTINCT
+        r.id,
+        r.candidate_id,
+        r.test_id,
+        r.total_questions,
+        r.correct_answers,
+        r.score,
+        r.remarks,
+        r.taken_at,
+        u.name as candidate_name,
+        u.email as candidate_email
+       FROM results r
+       JOIN users u ON r.candidate_id = u.id
+       WHERE r.test_id = ?
+       ORDER BY r.taken_at DESC`,
+      [req.params.id]
+    );
+
+    res.json({
+      success: true,
+      results,
+    });
+  } catch (error) {
+    console.error("Error fetching test results:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch test results",
+    });
   }
+}
+
+// Alternative: If you DO need proctoring data, use this version instead:
+
+async getTestResults(req, res) {
+  try {
+    const db = database.getPool();
+    const [tests] = await db.execute(
+      "SELECT created_by FROM tests WHERE id = ?",
+      [req.params.id]
+    );
+
+    if (tests.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Test not found",
+      });
+    }
+
+    if (tests[0].created_by !== req.user.id && req.user.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Unauthorized",
+      });
+    }
+
+    // FIXED: Get results directly from results table (which is the main source of truth)
+    // Only join to users table, not to candidates_tests which causes duplicates
+    const [results] = await db.execute(
+      `SELECT 
+        r.id,
+        r.candidate_id,
+        r.test_id,
+        r.total_questions,
+        r.correct_answers,
+        r.score,
+        r.remarks,
+        r.taken_at,
+        u.name as candidate_name,
+        u.email as candidate_email
+       FROM results r
+       INNER JOIN users u ON r.candidate_id = u.id
+       WHERE r.test_id = ?
+       GROUP BY r.id
+       ORDER BY r.taken_at DESC`,
+      [req.params.id]
+    );
+
+    res.json({
+      success: true,
+      results,
+    });
+  } catch (error) {
+    console.error("Error fetching test results:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch test results",
+    });
+  }
+}
 
   calculateRemarks(score) {
     if (score >= 90) return "Excellent";
@@ -781,4 +951,4 @@ class TestController {
   }
 }
 
-module.exports = new TestController();  
+module.exports = new TestController();
