@@ -21,6 +21,16 @@ const authMiddleware = (req, res, next) => {
   }
 };
 
+const adminMiddleware = (req, res, next) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({
+      success: false,
+      message: 'Admin access required'
+    });
+  }
+  next();
+};
+
 const requireRole = (...roles) => {
   return (req, res, next) => {
     if (!roles.includes(req.user.role)) {
@@ -33,4 +43,4 @@ const requireRole = (...roles) => {
   };
 };
 
-module.exports = { authMiddleware, requireRole };
+module.exports = { authMiddleware, requireRole, adminMiddleware };
