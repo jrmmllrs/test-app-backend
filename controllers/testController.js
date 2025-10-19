@@ -60,58 +60,58 @@ class TestController {
 
   // Add this method to your TestController class in testController.js
 
-async getAnswerReview(req, res) {
-  try {
-    const db = database.getPool();
-    const testId = req.params.id;
-    const candidateId = req.params.candidateId || req.user.id;
+  async getAnswerReview(req, res) {
+    try {
+      const db = database.getPool();
+      const testId = req.params.id;
+      const candidateId = req.params.candidateId || req.user.id;
 
-    // Check authorization - admin, test creator, or the candidate themselves
-    const [tests] = await db.execute(
-      "SELECT created_by, title, description FROM tests WHERE id = ?",
-      [testId]
-    );
+      // Check authorization - admin, test creator, or the candidate themselves
+      const [tests] = await db.execute(
+        "SELECT created_by, title, description FROM tests WHERE id = ?",
+        [testId]
+      );
 
-    if (tests.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Test not found",
-      });
-    }
+      if (tests.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Test not found",
+        });
+      }
 
-    const test = tests[0];
-    const isAuthorized =
-      req.user.role === "admin" ||
-      test.created_by === req.user.id ||
-      candidateId == req.user.id;
+      const test = tests[0];
+      const isAuthorized =
+        req.user.role === "admin" ||
+        test.created_by === req.user.id ||
+        candidateId == req.user.id;
 
-    if (!isAuthorized) {
-      return res.status(403).json({
-        success: false,
-        message: "Unauthorized",
-      });
-    }
+      if (!isAuthorized) {
+        return res.status(403).json({
+          success: false,
+          message: "Unauthorized",
+        });
+      }
 
-    // Get result
-    const [results] = await db.execute(
-      `SELECT id, score, total_questions, correct_answers, remarks, taken_at 
+      // Get result
+      const [results] = await db.execute(
+        `SELECT id, score, total_questions, correct_answers, remarks, taken_at 
      FROM results 
      WHERE candidate_id = ? AND test_id = ?`,
-      [candidateId, testId]
-    );
+        [candidateId, testId]
+      );
 
-    if (results.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "No results found for this test",
-      });
-    }
+      if (results.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "No results found for this test",
+        });
+      }
 
-    const result = results[0];
+      const result = results[0];
 
-    // UPDATED: Include explanation field
-    const [questions] = await db.execute(
-      `SELECT 
+      // UPDATED: Include explanation field
+      const [questions] = await db.execute(
+        `SELECT 
       q.id,
       q.question_text,
       q.question_type,
@@ -124,33 +124,33 @@ async getAnswerReview(req, res) {
      LEFT JOIN answers a ON q.id = a.question_id AND a.candidate_id = ?
      WHERE q.test_id = ?
      ORDER BY q.id`,
-      [candidateId, testId]
-    );
+        [candidateId, testId]
+      );
 
-    // Parse options for each question
-    const parsedQuestions = questions.map((q) => ({
-      ...q,
-      options: this.parseOptions(q.options),
-    }));
+      // Parse options for each question
+      const parsedQuestions = questions.map((q) => ({
+        ...q,
+        options: this.parseOptions(q.options),
+      }));
 
-    res.json({
-      success: true,
-      test: {
-        id: testId,
-        title: test.title,
-        description: test.description,
-      },
-      result,
-      questions: parsedQuestions,
-    });
-  } catch (error) {
-    console.error("Error fetching answer review:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch answer review",
-    });
+      res.json({
+        success: true,
+        test: {
+          id: testId,
+          title: test.title,
+          description: test.description,
+        },
+        result,
+        questions: parsedQuestions,
+      });
+    } catch (error) {
+      console.error("Error fetching answer review:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to fetch answer review",
+      });
+    }
   }
-}
 
   async saveProgress(req, res) {
     try {
@@ -227,98 +227,134 @@ async getAnswerReview(req, res) {
     }
   }
 
-async create(req, res) {
-  const {
-    title,
-    description,
-    time_limit,
-    questions,
-    enable_proctoring = true,
-    max_tab_switches = 3,
-    allow_copy_paste = false,
-    require_fullscreen = true,
-  } = req.body;
-  const created_by = req.user.id;
+  async create(req, res) {
+    const {
+      title,
+      description,
+      time_limit,
+      questions,
+      pdf_url, // NEW
+      google_drive_id, // NEW
+      thumbnail_url, // NEW
+      test_type, // NEW
+      target_role, // NEW
+      enable_proctoring = true,
+      max_tab_switches = 3,
+      allow_copy_paste = false,
+      require_fullscreen = true,
+    } = req.body;
+    const created_by = req.user.id;
 
-  if (!title || !questions || questions.length === 0) {
-    return res.status(400).json({
-      success: false,
-      message: "Title and at least one question are required",
-    });
-  }
-
-  const db = database.getPool();
-  const connection = await db.getConnection();
-
-  try {
-    await connection.beginTransaction();
-
-    const [testResult] = await connection.execute(
-      `INSERT INTO tests (title, description, time_limit, created_by, 
-       enable_proctoring, max_tab_switches, allow_copy_paste, require_fullscreen) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        title,
-        description || null,
-        time_limit || 30,
-        created_by,
-        enable_proctoring ? 1 : 0,
-        max_tab_switches,
-        allow_copy_paste ? 1 : 0,
-        require_fullscreen ? 1 : 0,
-      ]
-    );
-
-    const testId = testResult.insertId;
-
-    for (const question of questions) {
-      // UPDATED: Include explanation field
-      await connection.execute(
-        "INSERT INTO questions (test_id, question_text, question_type, options, correct_answer, explanation) VALUES (?, ?, ?, ?, ?, ?)",
-        [
-          testId,
-          question.question_text,
-          question.question_type,
-          question.options || null,
-          question.correct_answer || null,
-          question.explanation || null, // NEW: explanation field
-        ]
-      );
+    if (!title || !questions || questions.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Title and at least one question are required",
+      });
     }
 
-    await connection.commit();
+    // Validate PDF test requirements
+    if (test_type === "pdf_based" && !pdf_url) {
+      return res.status(400).json({
+        success: false,
+        message: "PDF URL is required for PDF-based tests",
+      });
+    }
 
-    res.status(201).json({
-      success: true,
-      message: "Test created successfully",
-      testId,
-    });
-  } catch (error) {
-    await connection.rollback();
-    console.error("Error creating test:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to create test",
-    });
-  } finally {
-    connection.release();
+    const db = database.getPool();
+    const connection = await db.getConnection();
+
+    try {
+      await connection.beginTransaction();
+
+      // UPDATED: Include new PDF and target_role fields
+      const [testResult] = await connection.execute(
+        `INSERT INTO tests (
+        title, description, time_limit, created_by,
+        pdf_url, google_drive_id, thumbnail_url, test_type, target_role,
+        enable_proctoring, max_tab_switches, allow_copy_paste, require_fullscreen
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          title,
+          description || null,
+          time_limit || 30,
+          created_by,
+          pdf_url || null, // NEW
+          google_drive_id || null, // NEW
+          thumbnail_url || null, // NEW
+          test_type || "standard", // NEW
+          target_role || "candidate", // NEW
+          enable_proctoring ? 1 : 0,
+          max_tab_switches,
+          allow_copy_paste ? 1 : 0,
+          require_fullscreen ? 1 : 0,
+        ]
+      );
+
+      const testId = testResult.insertId;
+
+      for (const question of questions) {
+        await connection.execute(
+          "INSERT INTO questions (test_id, question_text, question_type, options, correct_answer, explanation) VALUES (?, ?, ?, ?, ?, ?)",
+          [
+            testId,
+            question.question_text,
+            question.question_type,
+            question.options || null,
+            question.correct_answer || null,
+            question.explanation || null,
+          ]
+        );
+      }
+
+      await connection.commit();
+
+      res.status(201).json({
+        success: true,
+        message: "Test created successfully",
+        testId,
+      });
+    } catch (error) {
+      await connection.rollback();
+      console.error("Error creating test:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to create test",
+        error: error.message,
+      });
+    } finally {
+      connection.release();
+    }
   }
-}
 
   async getMyTests(req, res) {
     try {
       const db = database.getPool();
+
+      // Make sure to select ALL fields including PDF fields
       const [tests] = await db.execute(
-        `SELECT t.id, t.title, t.description, t.time_limit, t.created_at,
-                t.enable_proctoring, t.max_tab_switches,
-                COUNT(q.id) as question_count 
-         FROM tests t 
-         LEFT JOIN questions q ON t.id = q.test_id 
-         WHERE t.created_by = ? 
-         GROUP BY t.id 
-         ORDER BY t.created_at DESC`,
+        `SELECT 
+        t.id, 
+        t.title, 
+        t.description, 
+        t.time_limit, 
+        t.created_at,
+        t.enable_proctoring, 
+        t.max_tab_switches,
+        t.pdf_url,              -- ADD THIS
+        t.google_drive_id,      -- ADD THIS
+        t.thumbnail_url,        -- ADD THIS
+        t.test_type,            -- ADD THIS
+        t.target_role,          -- ADD THIS
+        COUNT(q.id) as question_count 
+       FROM tests t 
+       LEFT JOIN questions q ON t.id = q.test_id 
+       WHERE t.created_by = ? 
+       GROUP BY t.id 
+       ORDER BY t.created_at DESC`,
         [req.user.id]
       );
+
+      console.log("getMyTests - returning tests:", tests); // Debug log
 
       res.json({
         success: true,
@@ -337,32 +373,52 @@ async create(req, res) {
     try {
       const db = database.getPool();
       const userId = req.user.id;
+      const userRole = req.user.role; // 'candidate' or 'employer'
 
-      // First get all tests
+      console.log(
+        "getAvailableTests called for user:",
+        userId,
+        "role:",
+        userRole
+      ); // Debug
+
+      // Filter tests by target_role matching user's role
       const [tests] = await db.execute(
-        `SELECT t.id, t.title, t.description, t.time_limit, t.created_at,
-                t.enable_proctoring, u.name as created_by_name
-         FROM tests t 
-         LEFT JOIN users u ON t.created_by = u.id
-         ORDER BY t.created_at DESC`
+        `SELECT 
+        t.id, 
+        t.title, 
+        t.description, 
+        t.time_limit, 
+        t.created_at,
+        t.enable_proctoring, 
+        t.test_type, 
+        t.target_role,
+        t.pdf_url, 
+        t.google_drive_id, 
+        t.thumbnail_url,
+        u.name as created_by_name
+       FROM tests t 
+       LEFT JOIN users u ON t.created_by = u.id
+       WHERE t.target_role = ?
+       ORDER BY t.created_at DESC`,
+        [userRole] // This filters by 'employer' or 'candidate'
       );
 
-      // Then enrich with question count and status for each test
+      console.log("Found tests for role", userRole, ":", tests.length); // Debug
+
+      // Enrich with question count and completion status
       const enrichedTests = await Promise.all(
         tests.map(async (test) => {
-          // Get question count
           const [questions] = await db.execute(
             "SELECT COUNT(*) as count FROM questions WHERE test_id = ?",
             [test.id]
           );
 
-          // Check if completed
           const [results] = await db.execute(
             "SELECT id FROM results WHERE test_id = ? AND candidate_id = ?",
             [test.id, userId]
           );
 
-          // Check if in progress
           const [candidateTests] = await db.execute(
             "SELECT status FROM candidates_tests WHERE test_id = ? AND candidate_id = ?",
             [test.id, userId]
@@ -384,8 +440,7 @@ async create(req, res) {
         tests: enrichedTests,
       });
     } catch (error) {
-      console.error("Error fetching tests:", error);
-      console.error("Error details:", error.stack);
+      console.error("Error fetching available tests:", error);
       res.status(500).json({
         success: false,
         message: "Failed to fetch tests",
@@ -422,56 +477,61 @@ async create(req, res) {
     return [];
   }
 
-async getTestById(req, res) {
-  try {
-    const db = database.getPool();
-    const [tests] = await db.execute("SELECT * FROM tests WHERE id = ?", [
-      req.params.id,
-    ]);
+  async getTestById(req, res) {
+    try {
+      const db = database.getPool();
 
-    if (tests.length === 0) {
-      return res.status(404).json({
+      // UPDATED: Include PDF fields
+      const [tests] = await db.execute(
+        `SELECT id, title, description, time_limit, created_by,
+              pdf_url, google_drive_id, thumbnail_url, test_type, target_role,
+              enable_proctoring, max_tab_switches, allow_copy_paste, require_fullscreen,
+              created_at
+       FROM tests WHERE id = ?`,
+        [req.params.id]
+      );
+
+      if (tests.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Test not found",
+        });
+      }
+
+      const test = tests[0];
+
+      if (test.created_by !== req.user.id && req.user.role !== "admin") {
+        return res.status(403).json({
+          success: false,
+          message: "Unauthorized",
+        });
+      }
+
+      const [questions] = await db.execute(
+        "SELECT id, question_text, question_type, options, correct_answer, explanation FROM questions WHERE test_id = ? ORDER BY id",
+        [req.params.id]
+      );
+
+      const parsedQuestions = questions.map((q) => ({
+        ...q,
+        options: this.parseOptions(q.options),
+      }));
+
+      res.json({
+        success: true,
+        test: {
+          ...test,
+          questions: parsedQuestions,
+        },
+      });
+    } catch (error) {
+      console.error("Error fetching test:", error);
+      res.status(500).json({
         success: false,
-        message: "Test not found",
+        message: "Failed to fetch test",
       });
     }
-
-    const test = tests[0];
-
-    if (test.created_by !== req.user.id && req.user.role !== "admin") {
-      return res.status(403).json({
-        success: false,
-        message: "Unauthorized",
-      });
-    }
-
-    // UPDATED: Select explanation field
-    const [questions] = await db.execute(
-      "SELECT id, question_text, question_type, options, correct_answer, explanation FROM questions WHERE test_id = ? ORDER BY id",
-      [req.params.id]
-    );
-
-    // FIXED: Use parseOptions helper to handle both formats
-    const parsedQuestions = questions.map((q) => ({
-      ...q,
-      options: this.parseOptions(q.options),
-    }));
-
-    res.json({
-      success: true,
-      test: {
-        ...test,
-        questions: parsedQuestions,
-      },
-    });
-  } catch (error) {
-    console.error("Error fetching test:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch test",
-    });
   }
-}
 
   async getTestForTaking(req, res) {
     try {
@@ -492,8 +552,11 @@ async getTestById(req, res) {
         });
       }
 
+      // UPDATED: Include PDF fields
       const [tests] = await db.execute(
-        "SELECT id, title, description, time_limit FROM tests WHERE id = ?",
+        `SELECT id, title, description, time_limit, test_type, target_role,
+              pdf_url, google_drive_id, thumbnail_url
+       FROM tests WHERE id = ?`,
         [testId]
       );
 
@@ -504,12 +567,21 @@ async getTestById(req, res) {
         });
       }
 
+      const test = tests[0];
+
+      // Check if user role matches target_role
+      if (test.target_role !== req.user.role) {
+        return res.status(403).json({
+          success: false,
+          message: `This test is only available for ${test.target_role}s`,
+        });
+      }
+
       const [questions] = await db.execute(
         "SELECT id, question_text, question_type, options FROM questions WHERE test_id = ? ORDER BY id",
         [testId]
       );
 
-      // FIXED: Use parseOptions helper
       const parsedQuestions = questions.map((q) => ({
         ...q,
         options: this.parseOptions(q.options),
@@ -518,7 +590,7 @@ async getTestById(req, res) {
       res.json({
         success: true,
         test: {
-          ...tests[0],
+          ...test,
           questions: parsedQuestions,
         },
       });
@@ -530,7 +602,6 @@ async getTestById(req, res) {
       });
     }
   }
-
   async submitTest(req, res) {
     const { answers } = req.body;
     const testId = req.params.id;
@@ -689,103 +760,117 @@ async getTestById(req, res) {
     }
   }
 
-async update(req, res) {
-  const {
-    title,
-    description,
-    time_limit,
-    questions,
-    enable_proctoring,
-    max_tab_switches,
-    allow_copy_paste,
-    require_fullscreen,
-  } = req.body;
-  const testId = req.params.id;
+  async update(req, res) {
+    const {
+      title,
+      description,
+      time_limit,
+      questions,
+      pdf_url, // NEW
+      google_drive_id, // NEW
+      thumbnail_url, // NEW
+      test_type, // NEW
+      target_role, // NEW
+      enable_proctoring,
+      max_tab_switches,
+      allow_copy_paste,
+      require_fullscreen,
+    } = req.body;
+    const testId = req.params.id;
 
-  const db = database.getPool();
-
-  try {
-    const [tests] = await db.execute(
-      "SELECT created_by FROM tests WHERE id = ?",
-      [testId]
-    );
-
-    if (tests.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Test not found",
-      });
-    }
-
-    if (tests[0].created_by !== req.user.id && req.user.role !== "admin") {
-      return res.status(403).json({
-        success: false,
-        message: "Unauthorized",
-      });
-    }
-
-    const connection = await db.getConnection();
+    const db = database.getPool();
 
     try {
-      await connection.beginTransaction();
-
-      await connection.execute(
-        `UPDATE tests SET title = ?, description = ?, time_limit = ?,
-         enable_proctoring = ?, max_tab_switches = ?, allow_copy_paste = ?, require_fullscreen = ?
-         WHERE id = ?`,
-        [
-          title,
-          description || null,
-          time_limit || 30,
-          enable_proctoring !== undefined ? (enable_proctoring ? 1 : 0) : 1,
-          max_tab_switches !== undefined ? max_tab_switches : 3,
-          allow_copy_paste !== undefined ? (allow_copy_paste ? 1 : 0) : 0,
-          require_fullscreen !== undefined ? (require_fullscreen ? 1 : 0) : 1,
-          testId,
-        ]
+      const [tests] = await db.execute(
+        "SELECT created_by FROM tests WHERE id = ?",
+        [testId]
       );
 
-      if (questions && questions.length > 0) {
-        await connection.execute("DELETE FROM questions WHERE test_id = ?", [
-          testId,
-        ]);
-
-        for (const question of questions) {
-          // UPDATED: Include explanation field
-          await connection.execute(
-            "INSERT INTO questions (test_id, question_text, question_type, options, correct_answer, explanation) VALUES (?, ?, ?, ?, ?, ?)",
-            [
-              testId,
-              question.question_text,
-              question.question_type,
-              question.options || null,
-              question.correct_answer || null,
-              question.explanation || null, // NEW: explanation field
-            ]
-          );
-        }
+      if (tests.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Test not found",
+        });
       }
 
-      await connection.commit();
+      if (req.user.role !== "admin") {
+        return res.status(403).json({
+          success: false,
+          message: "Unauthorized",
+        });
+      }
 
-      res.json({
-        success: true,
-        message: "Test updated successfully",
-      });
+      const connection = await db.getConnection();
+
+      try {
+        await connection.beginTransaction();
+
+        // UPDATED: Include PDF and target_role fields
+        await connection.execute(
+          `UPDATE tests SET 
+          title = ?, description = ?, time_limit = ?,
+          pdf_url = ?, google_drive_id = ?, thumbnail_url = ?,
+          test_type = ?, target_role = ?,
+          enable_proctoring = ?, max_tab_switches = ?, 
+          allow_copy_paste = ?, require_fullscreen = ?
+         WHERE id = ?`,
+          [
+            title,
+            description || null,
+            time_limit || 30,
+            pdf_url || null, // NEW
+            google_drive_id || null, // NEW
+            thumbnail_url || null, // NEW
+            test_type || "standard", // NEW
+            target_role || "candidate", // NEW
+            enable_proctoring !== undefined ? (enable_proctoring ? 1 : 0) : 1,
+            max_tab_switches !== undefined ? max_tab_switches : 3,
+            allow_copy_paste !== undefined ? (allow_copy_paste ? 1 : 0) : 0,
+            require_fullscreen !== undefined ? (require_fullscreen ? 1 : 0) : 1,
+            testId,
+          ]
+        );
+
+        if (questions && questions.length > 0) {
+          await connection.execute("DELETE FROM questions WHERE test_id = ?", [
+            testId,
+          ]);
+
+          for (const question of questions) {
+            await connection.execute(
+              "INSERT INTO questions (test_id, question_text, question_type, options, correct_answer, explanation) VALUES (?, ?, ?, ?, ?, ?)",
+              [
+                testId,
+                question.question_text,
+                question.question_type,
+                question.options || null,
+                question.correct_answer || null,
+                question.explanation || null,
+              ]
+            );
+          }
+        }
+
+        await connection.commit();
+
+        res.json({
+          success: true,
+          message: "Test updated successfully",
+        });
+      } catch (error) {
+        await connection.rollback();
+        throw error;
+      } finally {
+        connection.release();
+      }
     } catch (error) {
-      await connection.rollback();
-      throw error;
-    } finally {
-      connection.release();
+      console.error("Error updating test:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to update test",
+      });
     }
-  } catch (error) {
-    console.error("Error updating test:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to update test",
-    });
   }
-}
 
   async delete(req, res) {
     try {
@@ -824,35 +909,35 @@ async update(req, res) {
     }
   }
 
- // In testController.js - Replace the getTestResults method with this:
+  // In testController.js - Replace the getTestResults method with this:
 
-async getTestResults(req, res) {
-  try {
-    const db = database.getPool();
-    const [tests] = await db.execute(
-      "SELECT created_by FROM tests WHERE id = ?",
-      [req.params.id]
-    );
+  async getTestResults(req, res) {
+    try {
+      const db = database.getPool();
+      const [tests] = await db.execute(
+        "SELECT created_by FROM tests WHERE id = ?",
+        [req.params.id]
+      );
 
-    if (tests.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Test not found",
-      });
-    }
+      if (tests.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Test not found",
+        });
+      }
 
-    if (tests[0].created_by !== req.user.id && req.user.role !== "admin") {
-      return res.status(403).json({
-        success: false,
-        message: "Unauthorized",
-      });
-    }
+      if (tests[0].created_by !== req.user.id && req.user.role !== "admin") {
+        return res.status(403).json({
+          success: false,
+          message: "Unauthorized",
+        });
+      }
 
-    // FIXED: Use DISTINCT and avoid problematic JOINs
-    // Only select from results table without joining to candidates_tests
-    // since we don't need tab_switch_count, violation_count, or flagged for basic results
-    const [results] = await db.execute(
-      `SELECT DISTINCT
+      // FIXED: Use DISTINCT and avoid problematic JOINs
+      // Only select from results table without joining to candidates_tests
+      // since we don't need tab_switch_count, violation_count, or flagged for basic results
+      const [results] = await db.execute(
+        `SELECT DISTINCT
         r.id,
         r.candidate_id,
         r.test_id,
@@ -867,50 +952,50 @@ async getTestResults(req, res) {
        JOIN users u ON r.candidate_id = u.id
        WHERE r.test_id = ?
        ORDER BY r.taken_at DESC`,
-      [req.params.id]
-    );
+        [req.params.id]
+      );
 
-    res.json({
-      success: true,
-      results,
-    });
-  } catch (error) {
-    console.error("Error fetching test results:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch test results",
-    });
+      res.json({
+        success: true,
+        results,
+      });
+    } catch (error) {
+      console.error("Error fetching test results:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to fetch test results",
+      });
+    }
   }
-}
 
-// Alternative: If you DO need proctoring data, use this version instead:
+  // Alternative: If you DO need proctoring data, use this version instead:
 
-async getTestResults(req, res) {
-  try {
-    const db = database.getPool();
-    const [tests] = await db.execute(
-      "SELECT created_by FROM tests WHERE id = ?",
-      [req.params.id]
-    );
+  async getTestResults(req, res) {
+    try {
+      const db = database.getPool();
+      const [tests] = await db.execute(
+        "SELECT created_by FROM tests WHERE id = ?",
+        [req.params.id]
+      );
 
-    if (tests.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Test not found",
-      });
-    }
+      if (tests.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Test not found",
+        });
+      }
 
-    if (tests[0].created_by !== req.user.id && req.user.role !== "admin") {
-      return res.status(403).json({
-        success: false,
-        message: "Unauthorized",
-      });
-    }
+      if (tests[0].created_by !== req.user.id && req.user.role !== "admin") {
+        return res.status(403).json({
+          success: false,
+          message: "Unauthorized",
+        });
+      }
 
-    // FIXED: Get results directly from results table (which is the main source of truth)
-    // Only join to users table, not to candidates_tests which causes duplicates
-    const [results] = await db.execute(
-      `SELECT 
+      // FIXED: Get results directly from results table (which is the main source of truth)
+      // Only join to users table, not to candidates_tests which causes duplicates
+      const [results] = await db.execute(
+        `SELECT 
         r.id,
         r.candidate_id,
         r.test_id,
@@ -926,21 +1011,21 @@ async getTestResults(req, res) {
        WHERE r.test_id = ?
        GROUP BY r.id
        ORDER BY r.taken_at DESC`,
-      [req.params.id]
-    );
+        [req.params.id]
+      );
 
-    res.json({
-      success: true,
-      results,
-    });
-  } catch (error) {
-    console.error("Error fetching test results:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch test results",
-    });
+      res.json({
+        success: true,
+        results,
+      });
+    } catch (error) {
+      console.error("Error fetching test results:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to fetch test results",
+      });
+    }
   }
-}
 
   calculateRemarks(score) {
     if (score >= 90) return "Excellent";
