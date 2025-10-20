@@ -3,6 +3,9 @@ const router = express.Router();
 const userController = require('../controllers/userController');
 const { authMiddleware, adminMiddleware } = require('../middleware/auth');
 
+// Get all departments (can be public or auth required)
+router.get('/departments', userController.getDepartments);
+
 // Get all users (admin only)
 router.get('/all', authMiddleware, adminMiddleware, userController.getAllUsers);
 
