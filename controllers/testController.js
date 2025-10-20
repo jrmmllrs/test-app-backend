@@ -548,43 +548,88 @@ async getTestForTaking(req, res) {
     return { correctCount, totalAutoGraded };
   }
 
-  async sendCompletionNotification(
-    userId,
-    testId,
-    testTitle,
-    totalAutoGraded,
-    correctCount,
-    score,
-    remarks
-  ) {
+// Fixed sendCompletionNotification method for testController.js
+
+async sendCompletionNotification(
+  userId,
+  testId,
+  testTitle,
+  totalAutoGraded,
+  correctCount,
+  score,
+  remarks
+) {
+  try {
     const db = database.getPool();
+    
+    // Get user details
     const [users] = await db.execute(
       "SELECT name, email FROM users WHERE id = ?",
       [userId]
     );
 
-    if (users.length > 0) {
-      const user = users[0];
-      await EmailService.sendCompletionNotification(
-        user.email,
-        user.name,
-        testTitle,
-        {
-          completionTime: new Date().toLocaleString(),
-          totalQuestions: totalAutoGraded,
-          correctAnswers: correctCount,
-          score,
-          remarks,
-        },
-        db
+    if (users.length === 0) {
+      console.warn(`User ${userId} not found for completion notification`);
+      return;
+    }
+
+    const user = users[0];
+    
+    // Send email notification (if EmailService exists)
+    try {
+      if (EmailService && typeof EmailService.sendCompletionNotification === 'function') {
+        await EmailService.sendCompletionNotification(
+          user.email,
+          user.name,
+          testTitle,
+          {
+            completionTime: new Date().toLocaleString(),
+            totalQuestions: totalAutoGraded,
+            correctAnswers: correctCount,
+            score,
+            remarks,
+          },
+          db
+        );
+      }
+    } catch (emailError) {
+      console.error("Error sending email:", emailError);
+      // Don't throw - email failure shouldn't block test submission
+    }
+
+    // Update invitation status if exists
+    try {
+      // Check if completed_at column exists
+      const [columns] = await db.execute(
+        `SELECT COLUMN_NAME 
+         FROM INFORMATION_SCHEMA.COLUMNS 
+         WHERE TABLE_SCHEMA = DATABASE() 
+         AND TABLE_NAME = 'test_invitations' 
+         AND COLUMN_NAME = 'completed_at'`
       );
 
-      await db.execute(
-        "UPDATE test_invitations SET status = ?, completed_at = NOW() WHERE candidate_email = ? AND test_id = ? AND status != ?",
-        ["completed", user.email, testId, "completed"]
-      );
+      if (columns.length > 0) {
+        // Column exists, use it
+        await db.execute(
+          "UPDATE test_invitations SET status = ?, completed_at = NOW() WHERE candidate_email = ? AND test_id = ? AND status != ?",
+          ["completed", user.email, testId, "completed"]
+        );
+      } else {
+        // Column doesn't exist, update without it
+        await db.execute(
+          "UPDATE test_invitations SET status = ? WHERE candidate_email = ? AND test_id = ? AND status != ?",
+          ["completed", user.email, testId, "completed"]
+        );
+      }
+    } catch (invitationError) {
+      console.error("Error updating invitation status:", invitationError);
+      // Don't throw - invitation update failure shouldn't block test submission
     }
+  } catch (error) {
+    console.error("Error in sendCompletionNotification:", error);
+    // Don't throw - notification failure shouldn't block test submission
   }
+}
 
   // ============ Test Results & Review ============
 
