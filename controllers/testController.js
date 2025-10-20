@@ -15,32 +15,48 @@ const AUTO_GRADED_TYPES = ["multiple_choice", "true_false"];
 
 const SQL_QUERIES = {
   selectTestById: `SELECT id, title, description, time_limit, created_by,
-    pdf_url, google_drive_id, thumbnail_url, test_type, target_role,
+    pdf_url, google_drive_id, thumbnail_url, test_type, target_role, department_id,
     enable_proctoring, max_tab_switches, allow_copy_paste, require_fullscreen,
     created_at FROM tests WHERE id = ?`,
 
-  selectTestsForTaking: `SELECT id, title, description, time_limit, test_type, target_role,
+  selectTestsForTaking: `SELECT id, title, description, time_limit, test_type, target_role, department_id,
     pdf_url, google_drive_id, thumbnail_url FROM tests WHERE id = ?`,
 
   selectMyTests: `SELECT 
-    t.id, t.title, t.description, t.time_limit, t.created_at,
+    t.id, t.title, t.description, t.time_limit, t.created_at, t.department_id,
     t.enable_proctoring, t.max_tab_switches,
     t.pdf_url, t.google_drive_id, t.thumbnail_url, t.test_type, t.target_role,
+    d.department_name,
     COUNT(q.id) as question_count 
    FROM tests t 
-   LEFT JOIN questions q ON t.id = q.test_id 
+   LEFT JOIN questions q ON t.id = q.test_id
+   LEFT JOIN departments d ON t.department_id = d.id
    WHERE t.created_by = ? 
    GROUP BY t.id 
    ORDER BY t.created_at DESC`,
 
   selectAvailableTests: `SELECT 
-    t.id, t.title, t.description, t.time_limit, t.created_at,
+    t.id, t.title, t.description, t.time_limit, t.created_at, t.department_id,
     t.enable_proctoring, t.test_type, t.target_role,
     t.pdf_url, t.google_drive_id, t.thumbnail_url,
+    d.department_name,
     u.name as created_by_name
    FROM tests t 
    LEFT JOIN users u ON t.created_by = u.id
-   WHERE t.target_role = ?
+   LEFT JOIN departments d ON t.department_id = d.id
+   WHERE t.target_role = ? AND t.is_active = 1
+   ORDER BY t.created_at DESC`,
+
+  selectTestsForCandidate: `SELECT 
+    t.id, t.title, t.description, t.time_limit, t.created_at, t.department_id,
+    t.test_type, t.target_role,
+    t.pdf_url, t.google_drive_id, t.thumbnail_url,
+    d.department_name,
+    u.name as created_by_name
+   FROM tests t 
+   LEFT JOIN users u ON t.created_by = u.id
+   LEFT JOIN departments d ON t.department_id = d.id
+   WHERE t.target_role = 'candidate' AND t.is_active = 1 AND t.department_id = ?
    ORDER BY t.created_at DESC`,
 
   selectQuestions: `SELECT id, question_text, question_type, options, correct_answer, explanation 
@@ -180,54 +196,69 @@ class TestController {
     }
   }
 
-  async getTestForTaking(req, res) {
-    try {
-      const db = database.getPool();
-      const { id: testId } = req.params;
-      const userId = req.user.id;
+async getTestForTaking(req, res) {
+  try {
+    const db = database.getPool();
+    const { id: testId } = req.params;
+    const userId = req.user.id;
 
-      // Check if already completed
-      const [results] = await db.execute(
-        "SELECT id FROM results WHERE candidate_id = ? AND test_id = ?",
-        [userId, testId]
-      );
+    // Check if already completed
+    const [results] = await db.execute(
+      "SELECT id FROM results WHERE candidate_id = ? AND test_id = ?",
+      [userId, testId]
+    );
 
-      if (results.length > 0) {
-        return res.status(403).json({
-          success: false,
-          message: "You have already completed this test.",
-        });
-      }
-
-      const test = await this.getTestData(
-        testId,
-        SQL_QUERIES.selectTestsForTaking
-      );
-
-      // Verify role eligibility
-      if (test.target_role !== req.user.role) {
-        return res.status(403).json({
-          success: false,
-          message: `This test is only available for ${test.target_role}s`,
-        });
-      }
-
-      const [questions] = await db.execute(
-        "SELECT id, question_text, question_type, options FROM questions WHERE test_id = ?",
-        [testId]
-      );
-
-      res.json({
-        success: true,
-        test: {
-          ...test,
-          questions: this.enrichWithParsedOptions(questions),
-        },
+    if (results.length > 0) {
+      return res.status(403).json({
+        success: false,
+        message: "You have already completed this test.",
       });
-    } catch (error) {
-      this.handleError(res, error);
     }
+
+    const test = await this.getTestData(
+      testId,
+      SQL_QUERIES.selectTestsForTaking
+    );
+
+    // Verify role eligibility
+    if (test.target_role !== req.user.role) {
+      return res.status(403).json({
+        success: false,
+        message: `This test is only available for ${test.target_role}s`,
+      });
+    }
+
+    // If candidate, verify department access
+    if (req.user.role === 'candidate' && test.department_id) {
+      const [userDept] = await db.execute(
+        'SELECT department_id FROM users WHERE id = ?',
+        [userId]
+      );
+
+      if (userDept.length === 0 || userDept[0].department_id !== test.department_id) {
+        return res.status(403).json({
+          success: false,
+          message: "This test is not available for your department",
+        });
+      }
+    }
+
+    const [questions] = await db.execute(
+      "SELECT id, question_text, question_type, options FROM questions WHERE test_id = ?",
+      [testId]
+    );
+
+    res.json({
+      success: true,
+      test: {
+        ...test,
+        questions: this.enrichWithParsedOptions(questions),
+      },
+    });
+  } catch (error) {
+    this.handleError(res, error);
   }
+}
 
   async getMyTests(req, res) {
     try {
@@ -242,25 +273,41 @@ class TestController {
     }
   }
 
-  async getAvailableTests(req, res) {
-    try {
-      const db = database.getPool();
-      const userId = req.user.id;
-      const userRole = req.user.role;
+ async getAvailableTests(req, res) {
+  try {
+    const db = database.getPool();
+    const userId = req.user.id;
+    const userRole = req.user.role;
 
-      const [tests] = await db.execute(SQL_QUERIES.selectAvailableTests, [
-        userRole,
-      ]);
+    let query = SQL_QUERIES.selectAvailableTests;
+    let params = [userRole];
 
-      const enrichedTests = await Promise.all(
-        tests.map((test) => this.enrichTestWithMetadata(db, test, userId))
+    // If candidate, filter by their department
+    if (userRole === 'candidate') {
+      const [userDept] = await db.execute(
+        'SELECT department_id FROM users WHERE id = ?',
+        [userId]
       );
 
-      res.json({ success: true, tests: enrichedTests });
-    } catch (error) {
-      this.handleError(res, error);
+      if (userDept.length === 0 || !userDept[0].department_id) {
+        return res.json({ success: true, tests: [] });
+      }
+
+      query = SQL_QUERIES.selectTestsForCandidate;
+      params = [userDept[0].department_id];
     }
+
+    const [tests] = await db.execute(query, params);
+
+    const enrichedTests = await Promise.all(
+      tests.map((test) => this.enrichTestWithMetadata(db, test, userId))
+    );
+
+    res.json({ success: true, tests: enrichedTests });
+  } catch (error) {
+    this.handleError(res, error);
   }
+}
 
   async enrichTestWithMetadata(db, test, userId) {
     const [questions] = await db.execute(
@@ -615,153 +662,165 @@ class TestController {
 
   // ============ Test CRUD Operations ============
 
-  async create(req, res) {
-    const db = database.getPool();
-    const connection = await db.getConnection();
+ async create(req, res) {
+  const db = database.getPool();
+  const connection = await db.getConnection();
 
-    try {
-      const {
-        title,
-        description,
-        time_limit,
-        questions,
-        pdf_url,
-        google_drive_id,
-        thumbnail_url,
-        test_type,
-        target_role,
-        enable_proctoring = true,
-        max_tab_switches = 3,
-        allow_copy_paste = false,
-        require_fullscreen = true,
-      } = req.body;
+  try {
+    const {
+      title,
+      description,
+      time_limit,
+      questions,
+      pdf_url,
+      google_drive_id,
+      thumbnail_url,
+      test_type,
+      target_role,
+      department_id,
+      enable_proctoring = true,
+      max_tab_switches = 3,
+      allow_copy_paste = false,
+      require_fullscreen = true,
+    } = req.body;
 
-      if (!title || !questions || questions.length === 0) {
-        return res.status(400).json({
-          success: false,
-          message: "Title and at least one question are required",
-        });
-      }
-
-      if (test_type === "pdf_based" && !pdf_url) {
-        return res.status(400).json({
-          success: false,
-          message: "PDF URL is required for PDF-based tests",
-        });
-      }
-
-      await connection.beginTransaction();
-
-      const [testResult] = await connection.execute(
-        `INSERT INTO tests (
-          title, description, time_limit, created_by,
-          pdf_url, google_drive_id, thumbnail_url, test_type, target_role,
-          enable_proctoring, max_tab_switches, allow_copy_paste, require_fullscreen
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          title,
-          description || null,
-          time_limit || 30,
-          req.user.id,
-          pdf_url || null,
-          google_drive_id || null,
-          thumbnail_url || null,
-          test_type || "standard",
-          target_role || "candidate",
-          enable_proctoring ? 1 : 0,
-          max_tab_switches,
-          allow_copy_paste ? 1 : 0,
-          require_fullscreen ? 1 : 0,
-        ]
-      );
-
-      await this.insertQuestions(connection, testResult.insertId, questions);
-      await connection.commit();
-
-      res.status(201).json({
-        success: true,
-        message: "Test created successfully",
-        testId: testResult.insertId,
+    if (!title || !questions || questions.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Title and at least one question are required",
       });
-    } catch (error) {
-      await connection.rollback();
-      this.handleError(res, error);
-    } finally {
-      connection.release();
     }
-  }
 
-  async update(req, res) {
-    const db = database.getPool();
-    const connection = await db.getConnection();
+    if (test_type === "pdf_based" && !pdf_url) {
+      return res.status(400).json({
+        success: false,
+        message: "PDF URL is required for PDF-based tests",
+      });
+    }
 
-    try {
-      const { id: testId } = req.params;
-      const {
+    if (target_role === 'candidate' && !department_id) {
+      return res.status(400).json({
+        success: false,
+        message: "Department is required for candidate tests",
+      });
+    }
+
+    await connection.beginTransaction();
+
+    const [testResult] = await connection.execute(
+      `INSERT INTO tests (
+        title, description, time_limit, created_by,
+        pdf_url, google_drive_id, thumbnail_url, test_type, target_role, department_id,
+        enable_proctoring, max_tab_switches, allow_copy_paste, require_fullscreen, is_active
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
         title,
-        description,
-        time_limit,
-        questions,
-        pdf_url,
-        google_drive_id,
-        thumbnail_url,
-        test_type,
-        target_role,
-        enable_proctoring,
+        description || null,
+        time_limit || 30,
+        req.user.id,
+        pdf_url || null,
+        google_drive_id || null,
+        thumbnail_url || null,
+        test_type || "standard",
+        target_role || "candidate",
+        target_role === 'candidate' ? department_id : null,
+        enable_proctoring ? 1 : 0,
         max_tab_switches,
-        allow_copy_paste,
-        require_fullscreen,
-      } = req.body;
+        allow_copy_paste ? 1 : 0,
+        require_fullscreen ? 1 : 0,
+        1
+      ]
+    );
 
-      await this.authorizeTestAccess(req.user.id, testId, req.user.role);
+    await this.insertQuestions(connection, testResult.insertId, questions);
+    await connection.commit();
 
-      await connection.beginTransaction();
-
-      await connection.execute(
-        `UPDATE tests SET 
-          title = ?, description = ?, time_limit = ?,
-          pdf_url = ?, google_drive_id = ?, thumbnail_url = ?,
-          test_type = ?, target_role = ?,
-          enable_proctoring = ?, max_tab_switches = ?, 
-          allow_copy_paste = ?, require_fullscreen = ?
-        WHERE id = ?`,
-        [
-          title,
-          description || null,
-          time_limit || 30,
-          pdf_url || null,
-          google_drive_id || null,
-          thumbnail_url || null,
-          test_type || "standard",
-          target_role || "candidate",
-          enable_proctoring !== undefined ? (enable_proctoring ? 1 : 0) : 1,
-          max_tab_switches !== undefined ? max_tab_switches : 3,
-          allow_copy_paste !== undefined ? (allow_copy_paste ? 1 : 0) : 0,
-          require_fullscreen !== undefined ? (require_fullscreen ? 1 : 0) : 1,
-          testId,
-        ]
-      );
-
-      if (questions && questions.length > 0) {
-        await connection.execute("DELETE FROM questions WHERE test_id = ?", [
-          testId,
-        ]);
-        await this.insertQuestions(connection, testId, questions);
-      }
-
-      await connection.commit();
-
-      res.json({
-        success: true,
-        message: "Test updated successfully",
-      });
-    } catch (error) {
-      await connection.rollback();
-      this.handleError(res, error);
-    } finally {
-      connection.release();
-    }
+    res.status(201).json({
+      success: true,
+      message: "Test created successfully",
+      testId: testResult.insertId,
+    });
+  } catch (error) {
+    await connection.rollback();
+    this.handleError(res, error);
+  } finally {
+    connection.release();
   }
+}
+
+async update(req, res) {
+  const db = database.getPool();
+  const connection = await db.getConnection();
+
+  try {
+    const { id: testId } = req.params;
+    const {
+      title,
+      description,
+      time_limit,
+      questions,
+      pdf_url,
+      google_drive_id,
+      thumbnail_url,
+      test_type,
+      target_role,
+      department_id,
+      enable_proctoring,
+      max_tab_switches,
+      allow_copy_paste,
+      require_fullscreen,
+    } = req.body;
+
+    await this.authorizeTestAccess(req.user.id, testId, req.user.role);
+
+    await connection.beginTransaction();
+
+    await connection.execute(
+      `UPDATE tests SET 
+        title = ?, description = ?, time_limit = ?,
+        pdf_url = ?, google_drive_id = ?, thumbnail_url = ?,
+        test_type = ?, target_role = ?, department_id = ?,
+        enable_proctoring = ?, max_tab_switches = ?, 
+        allow_copy_paste = ?, require_fullscreen = ?
+      WHERE id = ?`,
+      [
+        title,
+        description || null,
+        time_limit || 30,
+        pdf_url || null,
+        google_drive_id || null,
+        thumbnail_url || null,
+        test_type || "standard",
+        target_role || "candidate",
+        target_role === 'candidate' ? department_id : null,
+        enable_proctoring !== undefined ? (enable_proctoring ? 1 : 0) : 1,
+        max_tab_switches !== undefined ? max_tab_switches : 3,
+        allow_copy_paste !== undefined ? (allow_copy_paste ? 1 : 0) : 0,
+        require_fullscreen !== undefined ? (require_fullscreen ? 1 : 0) : 1,
+        testId,
+      ]
+    );
+
+    if (questions && questions.length > 0) {
+      await connection.execute("DELETE FROM questions WHERE test_id = ?", [
+        testId,
+      ]);
+      await this.insertQuestions(connection, testId, questions);
+    }
+
+    await connection.commit();
+
+    res.json({
+      success: true,
+      message: "Test updated successfully",
+    });
+  } catch (error) {
+    await connection.rollback();
+    this.handleError(res, error);
+  } finally {
+    connection.release();
+  }
+}
 
   async delete(req, res) {
     try {

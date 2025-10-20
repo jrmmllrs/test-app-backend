@@ -2,15 +2,36 @@ const bcrypt = require('bcryptjs');
 const database = require('../config/database');
 
 const userController = {
+  // Get all departments
+  getDepartments: async (req, res) => {
+    try {
+      const db = database.getPool();
+      const [departments] = await db.query(
+        'SELECT id, department_name, description, is_active FROM departments WHERE is_active = 1 ORDER BY department_name'
+      );
+      res.json({
+        success: true,
+        departments: departments
+      });
+    } catch (error) {
+      console.error('Error fetching departments:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to fetch departments'
+      });
+    }
+  },
+
   // Get all users
   getAllUsers: async (req, res) => {
     try {
       const db = database.getPool();
       
       const [users] = await db.query(
-        `SELECT id, name, email, role, created_at 
-         FROM users 
-         ORDER BY created_at DESC`
+        `SELECT u.id, u.name, u.email, u.role, u.department_id, d.department_name, u.created_at 
+         FROM users u
+         LEFT JOIN departments d ON u.department_id = d.id
+         ORDER BY u.created_at DESC`
       );
 
       res.json({
@@ -29,7 +50,7 @@ const userController = {
   // Create new user
   createUser: async (req, res) => {
     try {
-      const { name, email, password, role } = req.body;
+      const { name, email, password, role, department_id } = req.body;
       const db = database.getPool();
 
       // Validation
@@ -46,6 +67,14 @@ const userController = {
         return res.status(400).json({
           success: false,
           message: 'Invalid role'
+        });
+      }
+
+      // If role is candidate, department is required
+      if (role === 'candidate' && !department_id) {
+        return res.status(400).json({
+          success: false,
+          message: 'Department is required for candidates'
         });
       }
 
@@ -67,8 +96,8 @@ const userController = {
 
       // Insert user
       const [result] = await db.query(
-        'INSERT INTO users (name, email, password, role) VALUES (?, ?, ?, ?)',
-        [name, email, hashedPassword, role]
+        'INSERT INTO users (name, email, password, role, department_id) VALUES (?, ?, ?, ?, ?)',
+        [name, email, hashedPassword, role, role === 'candidate' ? department_id : null]
       );
 
       res.status(201).json({
@@ -89,7 +118,7 @@ const userController = {
   updateUser: async (req, res) => {
     try {
       const { id } = req.params;
-      const { name, email, password, role } = req.body;
+      const { name, email, password, role, department_id } = req.body;
       const db = database.getPool();
 
       // Validation
@@ -111,7 +140,7 @@ const userController = {
 
       // Check if user exists
       const [user] = await db.query(
-        'SELECT id FROM users WHERE id = ?',
+        'SELECT id, role FROM users WHERE id = ?',
         [id]
       );
 
@@ -119,6 +148,16 @@ const userController = {
         return res.status(404).json({
           success: false,
           message: 'User not found'
+        });
+      }
+
+      const userRole = role || user[0].role;
+
+      // If role is candidate, department is required
+      if (userRole === 'candidate' && !department_id) {
+        return res.status(400).json({
+          success: false,
+          message: 'Department is required for candidates'
         });
       }
 
@@ -136,8 +175,8 @@ const userController = {
       }
 
       // Build update query
-      let updateQuery = 'UPDATE users SET name = ?, email = ?, role = ?';
-      let params = [name, email, role];
+      let updateQuery = 'UPDATE users SET name = ?, email = ?, role = ?, department_id = ?';
+      let params = [name, email, userRole, userRole === 'candidate' ? department_id : null];
 
       // If password is provided, hash and update it
       if (password && password.trim() !== '') {
