@@ -12,6 +12,8 @@ const resultController = require("./controllers/resultController");
 const proctoringRoutes = require("./routes/proctoringRoutes");
 const invitationRoutes = require("./routes/InvitationRoutes"); // NEW
 const questionTypeRoutes = require('./routes/questionTypeRoutes');
+const userRoutes = require('./routes/userRoutes'); // NEW: Add this line
+
 
 
 dotenv.config();
@@ -40,6 +42,8 @@ app.use("/api/results", resultRoutes);
 app.use("/api/proctoring", proctoringRoutes);
 app.use("/api/invitations", invitationRoutes); // NEW
 app.use('/api/question-types', questionTypeRoutes);
+app.use('/api/users', userRoutes); // NEW: Add this line
+
 // Health check
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", message: "Server is running" });
